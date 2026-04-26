@@ -1,0 +1,6 @@
+streamlit
+pandas
+numpy-financial
+openpyxl
+plotly
+requests
