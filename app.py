@@ -39,7 +39,7 @@ elinika_v, vuosi_kuluma, mec_vrk, dod_avg = laske_akun_degradaatio(
     u_cycle_life,
     u_cal_loss,
     u_lampotila
-)
+);
 
     soc = df_sim["SoC"].values
 
