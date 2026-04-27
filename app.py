@@ -366,13 +366,13 @@ col1, col2, col3, col4 = st.columns(4)
 col1.metric("Energiankulutus / vrk", f"{tot_purettu:,.0f} kWh")
 col2.metric("Lataus / vrk", f"{tot_ladattu:,.0f} kWh")
 
+# KORJATTU KUTSU:
 elinika_v, vuosi_kuluma, mec_vrk, dod_avg = laske_akun_degradaatio(
-    df_sim,
-    tot_purettu,
-    u_akkukoko,
-    u_cycle_life,
-    u_cal_loss,
-    temp_kerroin
+    df_sim,          # 1. Aikasarjadata
+    u_akkukoko,      # 2. Akun koko (kWh)
+    u_cycle_life,    # 3. Sykli-ikä (100% DoD)
+    u_cal_loss,      # 4. Kalenteriväsymys (base rate)
+    u_lampotila      # 5. Lämpötila (°C)
 )
 
 # Huomioidaan lämpötilakerroin kalenterikulumaan
