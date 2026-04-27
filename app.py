@@ -275,7 +275,7 @@ except Exception as e:
 
 # --- 3. SIVUPALKKI (Käyttöliittymä) ---
 
-st.sidebar.markdown("---")
+st.sidebar.write
 
 if st.sidebar.button("Optimoi järjestelmä"):
     with st.spinner("Optimoidaan järjestelmää... tämä voi kestää hetken"):
