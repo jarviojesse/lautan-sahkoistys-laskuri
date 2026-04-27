@@ -47,7 +47,27 @@ def laske_akun_degradaatio(df_sim, akkukoko_kwh, cycle_life_100dod, base_calenda
     # --- 2. EFC (Equivalent Full Cycles) laskenta ---
     # Lasketaan päivittäinen syklitys integroimalla energian muutokset
     energy = soc / 100 * akkukoko_kwh
-    efc_day = np.sum(np.abs(np.diff(energy))) / (2 * akkukoko_kwh)
+    # vain todelliset suunnanvaihdokset (suodattaa "häröä")
+    diff = np.diff(energy)
+    # ignore very small noise (<1% capacity)
+    diff[np.abs(diff) < 0.01 * akkukoko_kwh] = 0
+
+    def rainflow_approx(x):
+        peaks = []
+
+        for i in range(1, len(x) - 1):
+            if (x[i] > x[i-1] and x[i] > x[i+1]) or (x[i] < x[i-1] and x[i] < x[i+1]):
+                peaks.append(x[i])
+
+        if len(peaks) < 2:
+            return 0
+
+        cycles = np.sum(np.abs(np.diff(peaks))) / (2 * np.max(x))
+        return cycles
+
+    efc_day = rainflow_approx(energy)
+    
+    efc_day = rainflow_approx(energy)
     efc_year = efc_day * 365
 
     # --- 3. Sykliväsymys (Cycle aging) ---
