@@ -32,6 +32,38 @@ def laske_lcc_yksinkertainen(test_akku, ladattu_vrk, investointi_pohja):
     # 10 vuoden elinkaarikustannus nykyarvolla
     lcc = inv + sum([vuosikulu / (1 + d_korko)**i for i in range(1, 11)])
     return lcc
+    
+def laske_akun_degradaatio(df_sim, tot_purettu_kwh, akkukoko_kwh, u_cycle_life, u_cal_loss, temp_kerroin):
+    
+    soc_series = df_sim['SoC']
+    soc_diff = soc_series.diff().abs().dropna()
+    
+    # Realistinen sykliestimaatti
+    if len(soc_diff) > 0:
+        efc_per_day = soc_diff.sum() / 200
+        dod_avg = soc_diff.mean() / 100 * 2
+    else:
+        efc_per_day = 0
+        dod_avg = 0.5
+
+    dod_avg = max(0.1, min(dod_avg, 1.0))
+
+    # DoD vaikutus sykli-ikään
+    dod_exponent = 1.3
+    effective_cycle_life = u_cycle_life / (dod_avg ** dod_exponent)
+
+    # Sykli-kuluminen
+    cycle_deg_per_year = (efc_per_day * 365) / effective_cycle_life
+
+    # Kalenterikuluminen
+    cal_deg_per_year = u_cal_loss * temp_kerroin
+
+    total_deg_per_year = cycle_deg_per_year + cal_deg_per_year
+
+    # 🔥 OIKEA elinikä
+    lifetime_years = 1 / total_deg_per_year if total_deg_per_year > 0 else 20
+
+    return lifetime_years, total_deg_per_year, efc_per_day, dod_avg
 
 # --- 2. DATAN LATAUS JA VAKIOT (Synkronoitu Juhan datan kanssa) ---
 try:
@@ -250,8 +282,14 @@ if st.sidebar.button("ETSI KAIKKI OPTIMIVAIHTOEHDOT"):
                     # Tarkistetaan elinikä (sykli-ikä vaihtelee kemian mukaan)
                     c_life = 3000 if k_nimi == "NMC" else 6000
                     m_vrk = t_purettu / test_koko
-                    v_kuluma = (u_cal_loss * temp_kerroin) + (m_vrk * 365 / c_life) * (1.0 - u_eol_kriteeri)
-                    e_v = (1.0 - u_eol_kriteeri) / v_kuluma if v_kuluma > 0 else 20
+                    e_v, _, _, _ = laske_akun_degradaatio(
+                    d_sim,
+                    t_purettu,
+                    test_koko,
+                    c_life,
+                    u_cal_loss,
+                    temp_kerroin
+)
                     
                     # Hyväksyntäehdot: 8v kesto JA SoC pysyy turvallisena
                     if e_v >= 8.0 and alin_soc >= u_soc_min:
@@ -311,12 +349,16 @@ col1, col2, col3, col4 = st.columns(4)
 col1.metric("Energiankulutus / vrk", f"{tot_purettu:,.0f} kWh")
 col2.metric("Lataus / vrk", f"{tot_ladattu:,.0f} kWh")
 
+elinika_v, vuosi_kuluma, mec_vrk, dod_avg = laske_akun_degradaatio(
+    df_sim,
+    tot_purettu,
+    u_akkukoko,
+    u_cycle_life,
+    u_cal_loss,
+    temp_kerroin
+)
 
-# Eliniän laskenta Juhan parametreilla
-mec_vrk = tot_purettu / u_akkukoko
 # Huomioidaan lämpötilakerroin kalenterikulumaan
-vuosi_kuluma = (u_cal_loss * temp_kerroin) + (mec_vrk * 365 / u_cycle_life) * (1.0 - u_eol_kriteeri)
-elinika_v = (1.0 - u_eol_kriteeri) / vuosi_kuluma if vuosi_kuluma > 0 else 20
 col3.metric("Akun elinikäennuste", f"{elinika_v:.1f} vuotta")
 col4.metric("Sykliä / vrk (MEC)", f"{mec_vrk:.2f}")
 
