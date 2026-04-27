@@ -390,8 +390,8 @@ if takaisinmaksuaika < 15:
     t3.metric("Takaisinmaksuaika", f"{takaisinmaksuaika:.1f} vuotta", delta_color="normal")
 else:
     t3.metric("Takaisinmaksuaika", "Yli 15v", delta="-", delta_color="inverse")
-    
-    
+
+
 def optimoi_jarjestelma():
     kaikki_skenaariot = []
 
