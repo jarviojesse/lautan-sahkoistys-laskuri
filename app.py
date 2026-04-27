@@ -4,10 +4,69 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, time
 import requests
+import itertools
 
 st.set_page_config(page_title="Lauttojen sähköistäminen v35 - Dynaaminen", layout="wide")
 
 # --- 1. APUFUNKTIOT ---
+
+def optimoi_jarjestelma():
+    kaikki_skenaariot = []
+
+    kemiat = [("NMC", 300), ("LFP", 200)]
+
+    diesel_vuosikulu = 1_000_000  # fallback (voit korvata tarkalla jos haluat)
+
+    for v_nimi, v_tiedot in rantavaihtoehdot.items():
+        for k_nimi, k_capex in kemiat:
+            for test_koko in range(1200, 4201, 200):
+
+                # Simulaatio
+                d_sim, _, t_ladattu, t_purettu = aja_simulaatio(
+                    test_koko,
+                    v_tiedot["max_p"],
+                    v_tiedot["max_p"],
+                    u_infra_malli,
+                    u_hyotysuhde,
+                    u_soc_max
+                )
+
+                alin_soc = d_sim["SoC"].min()
+
+                # elinikä
+                c_life = 3000 if k_nimi == "NMC" else 6000
+
+                e_v, _, _, _ = laske_akun_degradaatio(
+                    d_sim,
+                    test_koko,
+                    c_life,
+                    u_cal_loss,
+                    temp_kerroin
+                )
+
+                if e_v < 8.0 or alin_soc < u_soc_min:
+                    continue
+
+                inv = test_koko * u_capex_kwh
+                opex = t_ladattu * (st.session_state.s_hinta + s_siirto) * 365
+
+                lcc = inv + (opex * 10)
+
+                kaikki_skenaariot.append({
+                    "v": v_nimi,
+                    "koko": test_koko,
+                    "kemia": k_nimi,
+                    "lcc": lcc,
+                    "elinika": e_v
+                })
+
+    if not kaikki_skenaariot:
+        return None
+
+    df = pd.DataFrame(kaikki_skenaariot).sort_values("lcc")
+
+    return df.iloc[0].to_dict(), df
+
 def hae_sahkon_hinta():
     try:
         url = "https://api.porssisahko.net/v1/latest-prices.json"
@@ -142,6 +201,21 @@ except Exception as e:
     st.error(f"Virhe datan lukemisessa Master Excelistä: {e}"); st.stop()
 
 # --- 3. SIVUPALKKI (Käyttöliittymä) ---
+
+st.sidebar.markdown("---")
+
+if st.sidebar.button("⚙️ Optimoi järjestelmä"):
+    with st.spinner("Optimoidaan järjestelmää... tämä voi kestää hetken"):
+        optimi, df_all = optimoi_jarjestelma()
+
+        if optimi:
+            st.session_state.optimi = optimi
+            st.session_state.optimi_df = df_all
+            st.sidebar.success("Optimi löydetty!")
+        else:
+            st.sidebar.error("Ei löytynyt sopivaa ratkaisua.")
+            
+            
 st.sidebar.header("Aluksen valinta")
 uniikit_lautat = sorted(df_kaikki_aikataulut['Lautan nimi'].unique().tolist())
 valittu_lautta = st.sidebar.selectbox("Valitse lautta", uniikit_lautat)
@@ -364,10 +438,15 @@ if st.sidebar.button("ETSI KAIKKI OPTIMIVAIHTOEHDOT"):
         else:
             st.sidebar.error("Ei löytynyt ehtoja täyttävää ratkaisua.")
 
-# Päivitys: Jos optimi on ajettu, pakotetaan UI-arvot vastaamaan sitä
-if 'optimi' in st.session_state:
-    o = st.session_state.optimi
-    u_akkukoko = o['koko']
+if "optimi" in st.session_state:
+    opt = st.session_state.optimi
+
+    u_akkukoko = opt["koko"]
+
+    st.info(
+        f"⚡ OPTIMOITU: {opt['v']} / {opt['koko']} kWh / {opt['kemia']} "
+        f"(LCC: {opt['lcc']:,.0f} €, elinikä {opt['elinika']:.1f} vuotta)"
+    )
     # Huom: Jotta loppukoodi käyttää oikeita ranta-arvoja, päivitetään v_data
     v_data = dict(rantavaihtoehdot[o['V-Nimi']])
     latausteho_h = o['teho']
