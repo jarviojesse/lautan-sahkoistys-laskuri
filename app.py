@@ -34,33 +34,35 @@ def laske_lcc_yksinkertainen(test_akku, ladattu_vrk, investointi_pohja):
     return lcc
     
 def laske_akun_degradaatio(df_sim, tot_purettu_kwh, akkukoko_kwh, u_cycle_life, u_cal_loss, temp_kerroin):
-    
-    soc_series = df_sim['SoC']
-    soc_diff = soc_series.diff().abs().dropna()
-    
-    # Realistinen sykliestimaatti
-    if len(soc_diff) > 0:
-        efc_per_day = soc_diff.sum() / 200
-        dod_avg = soc_diff.mean() / 100 * 2
-    else:
-        efc_per_day = 0
-        dod_avg = 0.5
 
-    dod_avg = max(0.1, min(dod_avg, 1.0))
+    soc = df_sim['SoC'].values
 
-    # DoD vaikutus sykli-ikään
-    dod_exponent = 1.3
+    # --- EFC (energiaan perustuva) ---
+    energy = soc / 100 * akkukoko_kwh
+    delta = np.abs(np.diff(energy))
+    efc_per_day = np.sum(delta) / (2 * akkukoko_kwh)
+
+    # --- DoD ---
+    dod_avg = (np.max(soc) - np.min(soc)) / 100
+    dod_avg = max(0.05, min(dod_avg, 1.0))
+
+    # --- Syklielinikä ---
+    dod_exponent = 1.8
     effective_cycle_life = u_cycle_life / (dod_avg ** dod_exponent)
 
-    # Sykli-kuluminen
     cycle_deg_per_year = (efc_per_day * 365) / effective_cycle_life
 
-    # Kalenterikuluminen
-    cal_deg_per_year = u_cal_loss * temp_kerroin
+    # --- Kalenterikuluminen ---
+    avg_soc = np.mean(soc)
+
+    soc_stress = 1.0
+    if avg_soc > 60:
+        soc_stress += (avg_soc - 60) / 100 * 1.5
+
+    cal_deg_per_year = u_cal_loss * temp_kerroin * soc_stress
 
     total_deg_per_year = cycle_deg_per_year + cal_deg_per_year
 
-    # 🔥 OIKEA elinikä
     lifetime_years = 1 / total_deg_per_year if total_deg_per_year > 0 else 20
 
     return lifetime_years, total_deg_per_year, efc_per_day, dod_avg
