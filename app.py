@@ -216,6 +216,21 @@ if st.sidebar.button("Päivitä pörssisähkö"):
 
 
 # --- 5. ANALYYSI JA GRAAFIT ---
+# --- VARMISTETAAN SIMULAATION OLEMASSAOLO ---
+if "df_sim" not in st.session_state:
+    df_sim, df_bess, tot_ladattu, tot_purettu = aja_simulaatio(
+        u_akkukoko,
+        u_teho_houtskari if u_infra_malli != "2. Pää" else 0,
+        u_teho_korppoo if u_infra_malli != "1. Pää" else 0,
+        u_infra_malli,
+        u_hyotysuhde,
+        u_soc_max
+    )
+
+    st.session_state.df_sim = df_sim
+    st.session_state.tot_ladattu = tot_ladattu
+    st.session_state.tot_purettu = tot_purettu
+
 st.title(f"Analyysi: {valittu_lautta}")
 
 col1, col2, col3, col4 = st.columns(4)
