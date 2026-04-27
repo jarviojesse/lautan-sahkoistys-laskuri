@@ -167,6 +167,71 @@ def calendar_aging(avg_soc, temp_c, base_rate):
     temp_factor = np.exp(0.07 * (temp_c - 25))
 
     return base_rate * soc_factor * temp_factor
+    
+# --- 4. SIMULAATIO (PÄIVITETTY TARKKAAN MINUUTTILASKENNAN LOGIIKKAAN) ---
+def aja_simulaatio(akkukoko, teho_h, teho_k, infra_malli, hyotysuhde, s_max_limit):
+    df = df_aikataulu.copy()
+    df['Lähtö_dt'] = df['Lähtöaika'].apply(puhdista_aika)
+    df['Saapuminen_dt'] = df['Saapumisaika'].apply(puhdista_aika)
+    df = df.sort_values('Lähtö_dt')
+    
+    ajoteho_min = (base_ajoteho * s_kerroin) / 60
+    soc_kwh = akkukoko * (s_max_limit / 100)
+    
+    # BESS-alustus
+    bess_h_max = v_data["bess_kwh"] if teho_h > 0 else 0
+    bess_k_max = v_data["bess_kwh"] if teho_k > 0 else 0
+    soc_bess_h = bess_h_max * 0.9
+    soc_bess_k = bess_k_max * 0.9
+    
+    log = []
+    bess_log = [] # Pidetään mukana yhteensopivuuden vuoksi
+    tot_ladattu = 0
+    tot_purettu = 0
+
+    for idx, row in df.iterrows():
+        # 1. Ajo
+        kesto_min = (row['Saapuminen_dt'] - row['Lähtö_dt']).seconds / 60
+        energia_ajo = kesto_min * ajoteho_min
+        soc_kwh -= energia_ajo
+        tot_purettu += energia_ajo
+        
+        # BESS latautuu verkosta (150kW teholla)
+        soc_bess_h = min(bess_h_max * 0.9, soc_bess_h + (150 * kesto_min / 60)) if bess_h_max > 0 else 0
+        soc_bess_k = min(bess_k_max * 0.9, soc_bess_k + (150 * kesto_min / 60)) if bess_k_max > 0 else 0
+        
+        log.append({
+            'Aika': row['Lähtö_dt'], 'SoC': (soc_kwh / akkukoko) * 100, 
+            'BESS_H_SoC': (soc_bess_h / bess_h_max * 100) if bess_h_max > 0 else 0,
+            'BESS_K_SoC': (soc_bess_k / bess_k_max * 100) if bess_k_max > 0 else 0
+        })
+        
+        # 2. Lataus rannassa
+        if idx < len(df) - 1:
+            seisonta = (df.iloc[idx+1]['Lähtö_dt'] - row['Saapuminen_dt']).seconds / 60
+            nykyinen_sijainti = "Korppoo" if "Houtskari" in str(row['Lähtöpaikka']) else "Houtskari"
+            aktiivinen_teho = teho_h if nykyinen_sijainti == "Houtskari" else teho_k
+            
+            if seisonta >= LATAUS_MIN_MINS and aktiivinen_teho > 0:
+                vapaa_tila = (akkukoko * (s_max_limit / 100)) - soc_kwh
+                lataus = min(vapaa_tila, (aktiivinen_teho * (seisonta / 60)) * hyotysuhde)
+                
+                # Kulutetaan BESS-akkua
+                if nykyinen_sijainti == "Houtskari" and bess_h_max > 0:
+                    soc_bess_h -= min(lataus, max(0, soc_bess_h - (bess_h_max * 0.1)))
+                elif nykyinen_sijainti == "Korppoo" and bess_k_max > 0:
+                    soc_bess_k -= min(lataus, max(0, soc_bess_k - (bess_k_max * 0.1)))
+                
+                soc_kwh += lataus
+                tot_ladattu += lataus
+        
+        log.append({
+            'Aika': row['Saapuminen_dt'], 'SoC': (soc_kwh / akkukoko) * 100,
+            'BESS_H_SoC': (soc_bess_h / bess_h_max * 100) if bess_h_max > 0 else 0,
+            'BESS_K_SoC': (soc_bess_k / bess_k_max * 100) if bess_k_max > 0 else 0
+        })
+
+    return pd.DataFrame(log), pd.DataFrame(bess_log), tot_ladattu, tot_purettu
 
 # --- 2. DATAN LATAUS JA VAKIOT (Synkronoitu Juhan datan kanssa) ---
 try:
@@ -280,70 +345,6 @@ if st.sidebar.button("Päivitä pörssisähkö"):
     h = hae_sahkon_hinta()
     if h: st.session_state.s_hinta = h; st.sidebar.success("Päivitetty!")
 
-# --- 4. SIMULAATIO (PÄIVITETTY TARKKAAN MINUUTTILASKENNAN LOGIIKKAAN) ---
-def aja_simulaatio(akkukoko, teho_h, teho_k, infra_malli, hyotysuhde, s_max_limit):
-    df = df_aikataulu.copy()
-    df['Lähtö_dt'] = df['Lähtöaika'].apply(puhdista_aika)
-    df['Saapuminen_dt'] = df['Saapumisaika'].apply(puhdista_aika)
-    df = df.sort_values('Lähtö_dt')
-    
-    ajoteho_min = (base_ajoteho * s_kerroin) / 60
-    soc_kwh = akkukoko * (s_max_limit / 100)
-    
-    # BESS-alustus
-    bess_h_max = v_data["bess_kwh"] if teho_h > 0 else 0
-    bess_k_max = v_data["bess_kwh"] if teho_k > 0 else 0
-    soc_bess_h = bess_h_max * 0.9
-    soc_bess_k = bess_k_max * 0.9
-    
-    log = []
-    bess_log = [] # Pidetään mukana yhteensopivuuden vuoksi
-    tot_ladattu = 0
-    tot_purettu = 0
-
-    for idx, row in df.iterrows():
-        # 1. Ajo
-        kesto_min = (row['Saapuminen_dt'] - row['Lähtö_dt']).seconds / 60
-        energia_ajo = kesto_min * ajoteho_min
-        soc_kwh -= energia_ajo
-        tot_purettu += energia_ajo
-        
-        # BESS latautuu verkosta (150kW teholla)
-        soc_bess_h = min(bess_h_max * 0.9, soc_bess_h + (150 * kesto_min / 60)) if bess_h_max > 0 else 0
-        soc_bess_k = min(bess_k_max * 0.9, soc_bess_k + (150 * kesto_min / 60)) if bess_k_max > 0 else 0
-        
-        log.append({
-            'Aika': row['Lähtö_dt'], 'SoC': (soc_kwh / akkukoko) * 100, 
-            'BESS_H_SoC': (soc_bess_h / bess_h_max * 100) if bess_h_max > 0 else 0,
-            'BESS_K_SoC': (soc_bess_k / bess_k_max * 100) if bess_k_max > 0 else 0
-        })
-        
-        # 2. Lataus rannassa
-        if idx < len(df) - 1:
-            seisonta = (df.iloc[idx+1]['Lähtö_dt'] - row['Saapuminen_dt']).seconds / 60
-            nykyinen_sijainti = "Korppoo" if "Houtskari" in str(row['Lähtöpaikka']) else "Houtskari"
-            aktiivinen_teho = teho_h if nykyinen_sijainti == "Houtskari" else teho_k
-            
-            if seisonta >= LATAUS_MIN_MINS and aktiivinen_teho > 0:
-                vapaa_tila = (akkukoko * (s_max_limit / 100)) - soc_kwh
-                lataus = min(vapaa_tila, (aktiivinen_teho * (seisonta / 60)) * hyotysuhde)
-                
-                # Kulutetaan BESS-akkua
-                if nykyinen_sijainti == "Houtskari" and bess_h_max > 0:
-                    soc_bess_h -= min(lataus, max(0, soc_bess_h - (bess_h_max * 0.1)))
-                elif nykyinen_sijainti == "Korppoo" and bess_k_max > 0:
-                    soc_bess_k -= min(lataus, max(0, soc_bess_k - (bess_k_max * 0.1)))
-                
-                soc_kwh += lataus
-                tot_ladattu += lataus
-        
-        log.append({
-            'Aika': row['Saapuminen_dt'], 'SoC': (soc_kwh / akkukoko) * 100,
-            'BESS_H_SoC': (soc_bess_h / bess_h_max * 100) if bess_h_max > 0 else 0,
-            'BESS_K_SoC': (soc_bess_k / bess_k_max * 100) if bess_k_max > 0 else 0
-        })
-
-    return pd.DataFrame(log), pd.DataFrame(bess_log), tot_ladattu, tot_purettu
 
 # Suoritus
 latausteho_h = u_teho_houtskari if u_infra_malli in ["Molemmat päät", "Vain Houtskari"] else 0
