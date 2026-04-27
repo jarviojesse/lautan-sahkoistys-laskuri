@@ -33,55 +33,51 @@ def laske_lcc_yksinkertainen(test_akku, ladattu_vrk, investointi_pohja):
     lcc = inv + sum([vuosikulu / (1 + d_korko)**i for i in range(1, 11)])
     return lcc
     
-elinika_v, vuosi_kuluma, mec_vrk, dod_avg = laske_akun_degradaatio(
-    df_sim,
-    u_akkukoko,
-    u_cycle_life,
-    u_cal_loss,
-    u_lampotila
-);
-
+def laske_akun_degradaatio(df_sim, akkukoko_kwh, cycle_life_100dod, base_calendar_rate, temp_c):
+    """
+    Laskee akun eliniän perustuen sykli- ja kalenteriväsymykseen.
+    """
+    # Haetaan SoC-arvot simulaatiosta
     soc = df_sim["SoC"].values
 
-    # --- 1. DoD oikea laskenta ---
+    # --- 1. DoD (Depth of Discharge) laskenta ---
+    # Lasketaan vaihteluväli (max-min). np.clip varmistaa ettei DoD ole liian pieni/suuri.
     dod = np.clip((np.max(soc) - np.min(soc)) / 100, 0.05, 1.0)
 
-    # --- 2. EFC oikein (SOC-integraatio, ei input-summia) ---
+    # --- 2. EFC (Equivalent Full Cycles) laskenta ---
+    # Lasketaan päivittäinen syklitys integroimalla energian muutokset
     energy = soc / 100 * akkukoko_kwh
     efc_day = np.sum(np.abs(np.diff(energy))) / (2 * akkukoko_kwh)
     efc_year = efc_day * 365
 
-    # --- 3. Cycle aging ---
+    # --- 3. Sykliväsymys (Cycle aging) ---
     cycle_deg = cycle_aging(efc_year, dod, cycle_life_100dod)
 
-    # --- 4. Calendar aging ---
+    # --- 4. Kalenteriväsymys (Calendar aging) ---
     avg_soc = np.mean(soc)
     cal_deg = calendar_aging(avg_soc, temp_c, base_calendar_rate)
 
-    # --- 5. Total degradation ---
+    # --- 5. Kokonaisväsymys ja elinikä ---
     total_deg = cycle_deg + cal_deg
-
     lifetime_years = 1 / total_deg if total_deg > 0 else 100
 
     return lifetime_years, total_deg, efc_day, dod
-    
+
 def cycle_aging(efc_year, dod, cycle_life_100dod):
-    # DoD-korrektio (Peukert-tyyppinen eksponentti)
+    # DoD-korrektio (Akku kuluu vähemmän pienillä sykleillä)
     dod_exp = 1.7
-    
     effective_cycle_life = cycle_life_100dod / (dod ** dod_exp)
-    
     yearly_cycle_degradation = efc_year / effective_cycle_life
-    
     return yearly_cycle_degradation
-    
+
 def calendar_aging(avg_soc, temp_c, base_rate):
-    # SOC stress
+    # SOC-stressi (korkea varaustaso kuluttaa akkua enemmän)
     soc_factor = 1.0
     if avg_soc > 60:
-        soc_factor += (avg_soc - 60) * 0.02  # 2% per SOC-prosentti yli 60
+        soc_factor += (avg_soc - 60) * 0.02
 
-    # lämpötilakerroin (Arrhenius approx)
+    # Lämpötilakerroin (Arrhenius-yhtälön approksimaatio)
+    # Akun kesto puolittuu tyypillisesti jokaista 10 asteen nousua kohden
     temp_factor = np.exp(0.07 * (temp_c - 25))
 
     return base_rate * soc_factor * temp_factor
