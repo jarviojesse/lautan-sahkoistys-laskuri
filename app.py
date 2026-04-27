@@ -33,7 +33,7 @@ def laske_lcc_yksinkertainen(test_akku, ladattu_vrk, investointi_pohja):
     lcc = inv + sum([vuosikulu / (1 + d_korko)**i for i in range(1, 11)])
     return lcc
     
-def laske_akun_degradaatio_insinoori(
+def laske_akun_degradaatio(
     df_sim,
     tot_ladattu_kwh,
     tot_purettu_kwh,
