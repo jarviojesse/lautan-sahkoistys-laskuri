@@ -33,39 +33,38 @@ def laske_lcc_yksinkertainen(test_akku, ladattu_vrk, investointi_pohja):
     lcc = inv + sum([vuosikulu / (1 + d_korko)**i for i in range(1, 11)])
     return lcc
     
-def laske_akun_degradaatio(df_sim, tot_purettu_kwh, akkukoko_kwh, u_cycle_life, u_cal_loss, temp_kerroin):
+def laske_akun_degradaatio_insinoori(
+    df_sim,
+    tot_ladattu_kwh,
+    tot_purettu_kwh,
+    akkukoko_kwh,
+    cycle_life_100dod,
+    base_calendar_rate,
+    temp_c
+):
 
-    soc = df_sim['SoC'].values
+    soc = df_sim["SoC"].values
 
-    # --- EFC (energiaan perustuva) ---
-    energy = soc / 100 * akkukoko_kwh
-    delta = np.abs(np.diff(energy))
-    efc_per_day = np.sum(delta) / (2 * akkukoko_kwh)
+    # --- EFC ---
+    efc_day = (abs(tot_ladattu_kwh) + abs(tot_purettu_kwh)) / (2 * akkukoko_kwh)
+    efc_year = efc_day * 365
 
     # --- DoD ---
-    dod_avg = (np.max(soc) - np.min(soc)) / 100
-    dod_avg = max(0.05, min(dod_avg, 1.0))
+    dod = np.clip((np.max(soc) - np.min(soc)) / 100, 0.05, 1.0)
 
-    # --- Syklielinikä ---
-    dod_exponent = 1.8
-    effective_cycle_life = u_cycle_life / (dod_avg ** dod_exponent)
+    # --- SYKLI ---
+    cycle_deg = cycle_aging(efc_year, dod, cycle_life_100dod)
 
-    cycle_deg_per_year = (efc_per_day * 365) / effective_cycle_life
-
-    # --- Kalenterikuluminen ---
+    # --- KALENTERI ---
     avg_soc = np.mean(soc)
+    cal_deg = calendar_aging(avg_soc, temp_c, base_calendar_rate)
 
-    soc_stress = 1.0
-    if avg_soc > 60:
-        soc_stress += (avg_soc - 60) / 100 * 1.5
+    # --- TOTAL ---
+    total_deg = cycle_deg + cal_deg
 
-    cal_deg_per_year = u_cal_loss * temp_kerroin * soc_stress
+    lifetime_years = 1 / total_deg if total_deg > 0 else 50
 
-    total_deg_per_year = cycle_deg_per_year + cal_deg_per_year
-
-    lifetime_years = 1 / total_deg_per_year if total_deg_per_year > 0 else 20
-
-    return lifetime_years, total_deg_per_year, efc_per_day, dod_avg
+    return lifetime_years, total_deg, efc_day, dod
 
 # --- 2. DATAN LATAUS JA VAKIOT (Synkronoitu Juhan datan kanssa) ---
 try:
