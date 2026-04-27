@@ -18,7 +18,7 @@ rantavaihtoehdot = {
 # --- 1. APUFUNKTIOT ---
 
 def optimoi_jarjestelma(rantavaihtoehdot, aja_simulaatio, laske_akun_degradaatio,
-                        infra_malli, hyotysuhde, soc_max, soc_min, capex_kwh, siirto, korko):
+                        u_infra_malli, u_hyotysuhde, u_soc_max, u_soc_min, u_capex_kwh, u_siirto, u_korko):
     kaikki_skenaariot = []
 
     kemiat = [("NMC", 300), ("LFP", 200)]
@@ -378,101 +378,6 @@ def laske_lcc_yksinkertainen(test_akku, ladattu_vrk, investointi_pohja):
     lcc = inv + sum([vuosikulu / (1 + d_korko)**i for i in range(1, 11)])
     return lcc
 
-st.sidebar.markdown("---")
-if st.sidebar.button("ETSI KAIKKI OPTIMIVAIHTOEHDOT"):
-    with st.spinner('Analysoidaan kaikkia rantavaihtoehtoja ja akkukokoja...'):
-        kaikki_skenaariot = []
-        
-        # Haetaan diesel-vertailukohta Excel-datasta (v_data)
-        d_hinta = v_data.get('Polttoaineen hinta', 1.3)
-        d_kulutus_vrk = v_data.get('Polttoaineen kulutus', 1500)
-        diesel_vuosikulu = d_kulutus_vrk * d_hinta * 365 + v_data.get('Huoltokulut', 50000)
-
-        # Testataan eri kemiat (NMC ja LFP)
-        kemiat = [("NMC", 300), ("LFP", 200)] 
-
-        for v_nimi, v_tiedot in rantavaihtoehdot.items():
-            test_teho = v_tiedot["max_p"]
-            test_bess_kpl = 2 if u_infra_malli == "Molemmat päät" else 1
-            test_bess_kwh = v_tiedot["bess_kwh"] * test_bess_kpl
-            
-            # Markkinatulot (varmistetaan oletusarvot .get-metodilla)
-            test_markkinatulo = (v_tiedot.get('taajuustulo', 0) + 
-                                 v_tiedot.get('spot_saasto', 0) - 
-                                 v_tiedot.get('aggregointi_kulu', 0)) * test_bess_kpl
-            
-            for k_nimi, k_capex in kemiat:
-                for test_koko in range(1000, 4201, 200): 
-                    # Simulaatio (HUOM: lisätty sääkerroin 1.2 turvamarginaaliksi)
-                    d_sim, d_bess, t_ladattu, t_purettu = aja_simulaatio(
-                        test_koko, test_teho, test_teho, u_infra_malli, u_hyotysuhde, u_soc_max
-                    )
-                    
-                    alin_soc = d_sim['SoC'].min()
-                    
-                    # Tarkistetaan elinikä (sykli-ikä vaihtelee kemian mukaan)
-                    c_life = 3000 if k_nimi == "NMC" else 6000
-                    m_vrk = t_purettu / test_koko
-                    e_v, _, _, _ = laske_akun_degradaatio(
-                    d_sim,
-                    t_purettu,
-                    test_koko,
-                    c_life,
-                    u_cal_loss,
-                    temp_kerroin
-)
-                    
-                    # Hyväksyntäehdot: 8v kesto JA SoC pysyy turvallisena
-                    if e_v >= 8.0 and alin_soc >= u_soc_min:
-                        # CAPEX laskenta
-                        inv_pohja = (test_bess_kwh * b_capex_per_kwh) + (c_varsi_base if u_varsi_paalla else 0) + (c_liittyma_base * test_bess_kpl)
-                        test_inv = (test_koko * k_capex) + inv_pohja
-                        
-                        # OPEX laskenta (Sähkö + BESS huolto - Markkinatuotto)
-                        test_vuosikulu_sahko = (t_ladattu * (st.session_state.get('s_hinta', 0.1) + s_siirto) * 365)
-                        test_opex = test_vuosikulu_sahko + (test_bess_kwh * BESS_HUOLTO_OPEX) - test_markkinatulo
-                        
-                        # Säästöt vs Diesel
-                        vuotuinen_saasto = diesel_vuosikulu - test_opex
-                        tm_aika = test_inv / vuotuinen_saasto if vuotuinen_saasto > 0 else 99
-                        
-                        # 10v LCC
-                        test_lcc = test_inv + sum([test_opex / (1 + d_korko)**i for i in range(1, 11)])
-                        
-                        kaikki_skenaariot.append({
-                            'V-Nimi': v_nimi, 'koko': test_koko, 'kemia': k_nimi,
-                            'teho': test_teho, 'elinika': e_v, 'lcc': test_lcc,
-                            'alin_soc': round(alin_soc, 1), 'inv': test_inv,
-                            'takaisinmaksu': tm_aika, 'saasto': vuotuinen_saasto
-                        })
-
-        if kaikki_skenaariot:
-            df_results = pd.DataFrame(kaikki_skenaariot).sort_values("lcc")
-            # Tallennetaan paras session stateen
-            st.session_state.optimi = kaikki_skenaariot[0] # Halvin LCC
-            st.sidebar.success(f"Optimi löydetty: {df_results.iloc[0]['koko']} kWh ({df_results.iloc[0]['kemia']})")
-            
-            # Näytetään tulostaulukko pääruudulla
-            st.write("### Optimointitulokset (Top 5)")
-            st.table(df_results[['V-Nimi', 'koko', 'kemia', 'takaisinmaksu', 'lcc', 'alin_soc']].head(5))
-        else:
-            st.sidebar.error("Ei löytynyt ehtoja täyttävää ratkaisua.")
-
-# Päivitys: Jos optimi on ajettu, pakotetaan UI-arvot vastaamaan sitä
-if 'optimi' in st.session_state:
-    o = st.session_state.optimi
-    u_akkukoko = o['koko']
-    # Huom: Jotta loppukoodi käyttää oikeita ranta-arvoja, päivitetään v_data
-    v_data = dict(rantavaihtoehdot[o['V-Nimi']])
-    latausteho_h = o['teho']
-    latausteho_k = o['teho']
-    df_sim = o['df']
-    df_bess = o['df_b']
-    tot_purettu = o['purettu']
-    tot_ladattu = o['ladattu']
-    
-    st.info(f"**LÖYDETTY OPTIMI:** Halvin ratkaisu on **{o['V-Nimi']}** ja **{u_akkukoko} kWh** akku. "
-            f"Tällä yhdistelmällä elinikä on **{o['elinika']:.1f} vuotta** ja 10v elinkaarikustannus on pienin.")
 # --- 5. ANALYYSI JA GRAAFIT ---
 st.title(f"Analyysi: {valittu_lautta}")
 
