@@ -8,9 +8,16 @@ import itertools
 
 st.set_page_config(page_title="Lauttojen sähköistäminen v35 - Dynaaminen", layout="wide")
 
+rantavaihtoehdot = {
+    "V1: 20kV / 2MW (Liityntä)": {"kulu": 91482, "spot_saasto": 0, "taajuustulo": 0, "aggregointi_kulu": 0, "max_p": 2000, "bess_kwh": 0},
+    "V2: 0.4kV / 0.4MW (Liityntä)": {"kulu": 30688, "spot_saasto": 20000, "taajuustulo": 0, "aggregointi_kulu": 0, "max_p": 400, "bess_kwh": 0},
+    "V3: 20kV / 2MW + BESS": {"kulu": 91482, "spot_saasto": 20000, "taajuustulo": 100000, "aggregointi_kulu": 48000, "max_p": 2000, "bess_kwh": 1000},
+    "V4: 0.4kV / 0.4MW + BESS": {"kulu": 30688, "spot_saasto": 20000, "taajuustulo": 20000, "aggregointi_kulu": 16000, "max_p": 400, "bess_kwh": 500}
+}
+
 # --- 1. APUFUNKTIOT ---
 
-def optimoi_jarjestelma():
+def optimoi_jarjestelma(rantavaihtoehdot, aja_simulaatio, laske_akun_degradaatio):
     kaikki_skenaariot = []
 
     kemiat = [("NMC", 300), ("LFP", 200)]
@@ -206,7 +213,11 @@ st.sidebar.markdown("---")
 
 if st.sidebar.button("⚙️ Optimoi järjestelmä"):
     with st.spinner("Optimoidaan järjestelmää... tämä voi kestää hetken"):
-        optimi, df_all = optimoi_jarjestelma()
+        optimi, df_all = optimoi_jarjestelma(
+        rantavaihtoehdot,
+        aja_simulaatio,
+        laske_akun_degradaatio
+)
 
         if optimi:
             st.session_state.optimi = optimi
