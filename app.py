@@ -33,13 +33,13 @@ def laske_lcc_yksinkertainen(test_akku, ladattu_vrk, investointi_pohja):
     lcc = inv + sum([vuosikulu / (1 + d_korko)**i for i in range(1, 11)])
     return lcc
     
-def laske_akun_degradaatio(
+elinika_v, vuosi_kuluma, mec_vrk, dod_avg = laske_akun_degradaatio(
     df_sim,
-    akkukoko_kwh,
-    cycle_life_100dod,
-    base_calendar_rate,
-    temp_c
-):
+    u_akkukoko,
+    u_cycle_life,
+    u_cal_loss,
+    u_lampotila
+)
 
     soc = df_sim["SoC"].values
 
