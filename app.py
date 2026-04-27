@@ -35,8 +35,6 @@ def laske_lcc_yksinkertainen(test_akku, ladattu_vrk, investointi_pohja):
     
 def laske_akun_degradaatio(
     df_sim,
-    tot_ladattu_kwh,
-    tot_purettu_kwh,
     akkukoko_kwh,
     cycle_life_100dod,
     base_calendar_rate,
@@ -45,26 +43,48 @@ def laske_akun_degradaatio(
 
     soc = df_sim["SoC"].values
 
-    # --- EFC ---
-    efc_day = (abs(tot_ladattu_kwh) + abs(tot_purettu_kwh)) / (2 * akkukoko_kwh)
-    efc_year = efc_day * 365
-
-    # --- DoD ---
+    # --- 1. DoD oikea laskenta ---
     dod = np.clip((np.max(soc) - np.min(soc)) / 100, 0.05, 1.0)
 
-    # --- SYKLI ---
+    # --- 2. EFC oikein (SOC-integraatio, ei input-summia) ---
+    energy = soc / 100 * akkukoko_kwh
+    efc_day = np.sum(np.abs(np.diff(energy))) / (2 * akkukoko_kwh)
+    efc_year = efc_day * 365
+
+    # --- 3. Cycle aging ---
     cycle_deg = cycle_aging(efc_year, dod, cycle_life_100dod)
 
-    # --- KALENTERI ---
+    # --- 4. Calendar aging ---
     avg_soc = np.mean(soc)
     cal_deg = calendar_aging(avg_soc, temp_c, base_calendar_rate)
 
-    # --- TOTAL ---
+    # --- 5. Total degradation ---
     total_deg = cycle_deg + cal_deg
 
-    lifetime_years = 1 / total_deg if total_deg > 0 else 50
+    lifetime_years = 1 / total_deg if total_deg > 0 else 100
 
     return lifetime_years, total_deg, efc_day, dod
+    
+def cycle_aging(efc_year, dod, cycle_life_100dod):
+    # DoD-korrektio (Peukert-tyyppinen eksponentti)
+    dod_exp = 1.7
+    
+    effective_cycle_life = cycle_life_100dod / (dod ** dod_exp)
+    
+    yearly_cycle_degradation = efc_year / effective_cycle_life
+    
+    return yearly_cycle_degradation
+    
+def calendar_aging(avg_soc, temp_c, base_rate):
+    # SOC stress
+    soc_factor = 1.0
+    if avg_soc > 60:
+        soc_factor += (avg_soc - 60) * 0.02  # 2% per SOC-prosentti yli 60
+
+    # lämpötilakerroin (Arrhenius approx)
+    temp_factor = np.exp(0.07 * (temp_c - 25))
+
+    return base_rate * soc_factor * temp_factor
 
 # --- 2. DATAN LATAUS JA VAKIOT (Synkronoitu Juhan datan kanssa) ---
 try:
