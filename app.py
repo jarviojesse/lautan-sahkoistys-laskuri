@@ -8,6 +8,197 @@ import itertools
 
 st.set_page_config(page_title="Lauttojen sähköistäminen v35 - Dynaaminen", layout="wide")
 
+
+# --- 4. SIMULAATIO (PÄIVITETTY TARKKAAN MINUUTTILASKENNAN LOGIIKKAAN) ---
+def aja_simulaatio(akkukoko, teho_h, teho_k, infra_malli, hyotysuhde, s_max_limit):
+    df = df_aikataulu.copy()
+    df['Lähtö_dt'] = df['Lähtöaika'].apply(puhdista_aika)
+    df['Saapuminen_dt'] = df['Saapumisaika'].apply(puhdista_aika)
+    df = df.sort_values('Lähtö_dt')
+    
+    ajoteho_min = (base_ajoteho * s_kerroin) / 60
+    soc_kwh = akkukoko * (s_max_limit / 100)
+    
+    # BESS-alustus
+    bess_h_max = v_data["bess_kwh"] if teho_h > 0 else 0
+    bess_k_max = v_data["bess_kwh"] if teho_k > 0 else 0
+    soc_bess_h = bess_h_max * 0.9
+    soc_bess_k = bess_k_max * 0.9
+    
+    log = []
+    bess_log = [] # Pidetään mukana yhteensopivuuden vuoksi
+    tot_ladattu = 0
+    tot_purettu = 0
+
+    for idx, row in df.iterrows():
+        # 1. Ajo
+        kesto_min = (row['Saapuminen_dt'] - row['Lähtö_dt']).seconds / 60
+        energia_ajo = kesto_min * ajoteho_min
+        soc_kwh -= energia_ajo
+        tot_purettu += energia_ajo
+        
+        # BESS latautuu verkosta (150kW teholla)
+        soc_bess_h = min(bess_h_max * 0.9, soc_bess_h + (150 * kesto_min / 60)) if bess_h_max > 0 else 0
+        soc_bess_k = min(bess_k_max * 0.9, soc_bess_k + (150 * kesto_min / 60)) if bess_k_max > 0 else 0
+        
+        log.append({
+            'Aika': row['Lähtö_dt'], 'SoC': (soc_kwh / akkukoko) * 100, 
+            'BESS_H_SoC': (soc_bess_h / bess_h_max * 100) if bess_h_max > 0 else 0,
+            'BESS_K_SoC': (soc_bess_k / bess_k_max * 100) if bess_k_max > 0 else 0
+        })
+        
+        # 2. Lataus rannassa
+        if idx < len(df) - 1:
+            seisonta = (df.iloc[idx+1]['Lähtö_dt'] - row['Saapuminen_dt']).seconds / 60
+            nykyinen_sijainti = "Korppoo" if "Houtskari" in str(row['Lähtöpaikka']) else "Houtskari"
+            aktiivinen_teho = teho_h if nykyinen_sijainti == "Houtskari" else teho_k
+            
+            if seisonta >= LATAUS_MIN_MINS and aktiivinen_teho > 0:
+                vapaa_tila = (akkukoko * (s_max_limit / 100)) - soc_kwh
+                lataus = min(vapaa_tila, (aktiivinen_teho * (seisonta / 60)) * hyotysuhde)
+                
+                # Kulutetaan BESS-akkua
+                if nykyinen_sijainti == "Houtskari" and bess_h_max > 0:
+                    soc_bess_h -= min(lataus, max(0, soc_bess_h - (bess_h_max * 0.1)))
+                elif nykyinen_sijainti == "Korppoo" and bess_k_max > 0:
+                    soc_bess_k -= min(lataus, max(0, soc_bess_k - (bess_k_max * 0.1)))
+                
+                soc_kwh += lataus
+                tot_ladattu += lataus
+        
+        log.append({
+            'Aika': row['Saapuminen_dt'], 'SoC': (soc_kwh / akkukoko) * 100,
+            'BESS_H_SoC': (soc_bess_h / bess_h_max * 100) if bess_h_max > 0 else 0,
+            'BESS_K_SoC': (soc_bess_k / bess_k_max * 100) if bess_k_max > 0 else 0
+        })
+
+    return pd.DataFrame(log), pd.DataFrame(bess_log), tot_ladattu, tot_purettu
+
+# Suoritus
+latausteho_h = u_teho_houtskari if u_infra_malli in ["Molemmat päät", "Vain Houtskari"] else 0
+latausteho_k = u_teho_korppoo if u_infra_malli in ["Molemmat päät", "Vain Korppoo"] else 0
+
+# Kutsutaan funktiota niin että paluuarvot (4 kpl) täsmäävät
+df_sim, df_bess, tot_ladattu, tot_purettu = aja_simulaatio(
+    u_akkukoko, latausteho_h, latausteho_k, u_infra_malli, u_hyotysuhde, u_soc_max
+)
+
+# --- Määritellään muuttujat optimointia ja talouslaskentaa varten ---
+bess_kpl = 2 if u_infra_malli == "Molemmat päät" else 1
+kok_bess_kwh = v_data["bess_kwh"] * bess_kpl
+markkinatuotto_v = (v_data['taajuustulo'] + v_data['spot_saasto'] - v_data['aggregointi_kulu']) * bess_kpl
+
+def laske_lcc_yksinkertainen(test_akku, ladattu_vrk, investointi_pohja):
+    # Lasketaan investointi (CAPEX)
+    inv = (test_akku * u_capex_kwh) + investointi_pohja
+    # Vuotuiset operatiiviset kulut (Sähkö + huolto - tuotot)
+    vuosikulu = (ladattu_vrk * (st.session_state.s_hinta + s_siirto) * 365) + \
+                (kok_bess_kwh * BESS_HUOLTO_OPEX) - markkinatuotto_v
+    # 10 vuoden elinkaarikustannus nykyarvolla (diskontattuna)
+    lcc = inv + sum([vuosikulu / (1 + d_korko)**i for i in range(1, 11)])
+    return lcc
+
+st.sidebar.markdown("---")
+if st.sidebar.button("ETSI KAIKKI OPTIMIVAIHTOEHDOT"):
+    with st.spinner('Analysoidaan kaikkia rantavaihtoehtoja ja akkukokoja...'):
+        kaikki_skenaariot = []
+        
+        # Haetaan diesel-vertailukohta Excel-datasta (v_data)
+        d_hinta = v_data.get('Polttoaineen hinta', 1.3)
+        d_kulutus_vrk = v_data.get('Polttoaineen kulutus', 1500)
+        diesel_vuosikulu = d_kulutus_vrk * d_hinta * 365 + v_data.get('Huoltokulut', 50000)
+
+        # Testataan eri kemiat (NMC ja LFP)
+        kemiat = [("NMC", 300), ("LFP", 200)] 
+
+        for v_nimi, v_tiedot in rantavaihtoehdot.items():
+            test_teho = v_tiedot["max_p"]
+            test_bess_kpl = 2 if u_infra_malli == "Molemmat päät" else 1
+            test_bess_kwh = v_tiedot["bess_kwh"] * test_bess_kpl
+            
+            # Markkinatulot (varmistetaan oletusarvot .get-metodilla)
+            test_markkinatulo = (v_tiedot.get('taajuustulo', 0) + 
+                                 v_tiedot.get('spot_saasto', 0) - 
+                                 v_tiedot.get('aggregointi_kulu', 0)) * test_bess_kpl
+            
+            for k_nimi, k_capex in kemiat:
+                for test_koko in range(1000, 4201, 200): 
+                    # Simulaatio (HUOM: lisätty sääkerroin 1.2 turvamarginaaliksi)
+                    d_sim, d_bess, t_ladattu, t_purettu = aja_simulaatio(
+                        test_koko, test_teho, test_teho, u_infra_malli, u_hyotysuhde, u_soc_max
+                    )
+                    
+                    alin_soc = d_sim['SoC'].min()
+                    
+                    # Tarkistetaan elinikä (sykli-ikä vaihtelee kemian mukaan)
+                    c_life = 3000 if k_nimi == "NMC" else 6000
+                    m_vrk = t_purettu / test_koko
+                    e_v, _, _, _ = laske_akun_degradaatio(
+                    d_sim,
+                    t_purettu,
+                    test_koko,
+                    c_life,
+                    u_cal_loss,
+                    temp_kerroin
+)
+                    
+                    # Hyväksyntäehdot: 8v kesto JA SoC pysyy turvallisena
+                    if e_v >= 8.0 and alin_soc >= u_soc_min:
+                        # CAPEX laskenta
+                        inv_pohja = (test_bess_kwh * b_capex_per_kwh) + (c_varsi_base if u_varsi_paalla else 0) + (c_liittyma_base * test_bess_kpl)
+                        test_inv = (test_koko * k_capex) + inv_pohja
+                        
+                        # OPEX laskenta (Sähkö + BESS huolto - Markkinatuotto)
+                        test_vuosikulu_sahko = (t_ladattu * (st.session_state.get('s_hinta', 0.1) + s_siirto) * 365)
+                        test_opex = test_vuosikulu_sahko + (test_bess_kwh * BESS_HUOLTO_OPEX) - test_markkinatulo
+                        
+                        # Säästöt vs Diesel
+                        vuotuinen_saasto = diesel_vuosikulu - test_opex
+                        tm_aika = test_inv / vuotuinen_saasto if vuotuinen_saasto > 0 else 99
+                        
+                        # 10v LCC
+                        test_lcc = test_inv + sum([test_opex / (1 + d_korko)**i for i in range(1, 11)])
+                        
+                        kaikki_skenaariot.append({
+                            'V-Nimi': v_nimi, 'koko': test_koko, 'kemia': k_nimi,
+                            'teho': test_teho, 'elinika': e_v, 'lcc': test_lcc,
+                            'alin_soc': round(alin_soc, 1), 'inv': test_inv,
+                            'takaisinmaksu': tm_aika, 'saasto': vuotuinen_saasto
+                        })
+
+        if kaikki_skenaariot:
+            df_results = pd.DataFrame(kaikki_skenaariot).sort_values("lcc")
+            # Tallennetaan paras session stateen
+            st.session_state.optimi = kaikki_skenaariot[0] # Halvin LCC
+            st.sidebar.success(f"Optimi löydetty: {df_results.iloc[0]['koko']} kWh ({df_results.iloc[0]['kemia']})")
+            
+            # Näytetään tulostaulukko pääruudulla
+            st.write("### Optimointitulokset (Top 5)")
+            st.table(df_results[['V-Nimi', 'koko', 'kemia', 'takaisinmaksu', 'lcc', 'alin_soc']].head(5))
+        else:
+            st.sidebar.error("Ei löytynyt ehtoja täyttävää ratkaisua.")
+
+if "optimi" in st.session_state:
+    opt = st.session_state.optimi
+
+    u_akkukoko = opt["koko"]
+
+    st.info(
+        f"⚡ OPTIMOITU: {opt['v']} / {opt['koko']} kWh / {opt['kemia']} "
+        f"(LCC: {opt['lcc']:,.0f} €, elinikä {opt['elinika']:.1f} vuotta)"
+    )
+    # Huom: Jotta loppukoodi käyttää oikeita ranta-arvoja, päivitetään v_data
+    v_data = dict(rantavaihtoehdot[o['V-Nimi']])
+    latausteho_h = o['teho']
+    latausteho_k = o['teho']
+    df_sim = o['df']
+    df_bess = o['df_b']
+    tot_purettu = o['purettu']
+    tot_ladattu = o['ladattu']
+    
+    st.info(f"**LÖYDETTY OPTIMI:** Halvin ratkaisu on **{o['V-Nimi']}** ja **{u_akkukoko} kWh** akku. "
+            f"Tällä yhdistelmällä elinikä on **{o['elinika']:.1f} vuotta** ja 10v elinkaarikustannus on pienin.")
+
 st.sidebar.header("Rantavaihtoehto")
 rantavaihtoehdot = {
     "V1: 20kV / 2MW (Liityntä)": {"kulu": 91482, "spot_saasto": 0, "taajuustulo": 0, "aggregointi_kulu": 0, "max_p": 2000, "bess_kwh": 0},
@@ -271,195 +462,7 @@ if st.sidebar.button("Päivitä pörssisähkö"):
     h = hae_sahkon_hinta()
     if h: st.session_state.s_hinta = h; st.sidebar.success("Päivitetty!")
 
-# --- 4. SIMULAATIO (PÄIVITETTY TARKKAAN MINUUTTILASKENNAN LOGIIKKAAN) ---
-def aja_simulaatio(akkukoko, teho_h, teho_k, infra_malli, hyotysuhde, s_max_limit):
-    df = df_aikataulu.copy()
-    df['Lähtö_dt'] = df['Lähtöaika'].apply(puhdista_aika)
-    df['Saapuminen_dt'] = df['Saapumisaika'].apply(puhdista_aika)
-    df = df.sort_values('Lähtö_dt')
-    
-    ajoteho_min = (base_ajoteho * s_kerroin) / 60
-    soc_kwh = akkukoko * (s_max_limit / 100)
-    
-    # BESS-alustus
-    bess_h_max = v_data["bess_kwh"] if teho_h > 0 else 0
-    bess_k_max = v_data["bess_kwh"] if teho_k > 0 else 0
-    soc_bess_h = bess_h_max * 0.9
-    soc_bess_k = bess_k_max * 0.9
-    
-    log = []
-    bess_log = [] # Pidetään mukana yhteensopivuuden vuoksi
-    tot_ladattu = 0
-    tot_purettu = 0
 
-    for idx, row in df.iterrows():
-        # 1. Ajo
-        kesto_min = (row['Saapuminen_dt'] - row['Lähtö_dt']).seconds / 60
-        energia_ajo = kesto_min * ajoteho_min
-        soc_kwh -= energia_ajo
-        tot_purettu += energia_ajo
-        
-        # BESS latautuu verkosta (150kW teholla)
-        soc_bess_h = min(bess_h_max * 0.9, soc_bess_h + (150 * kesto_min / 60)) if bess_h_max > 0 else 0
-        soc_bess_k = min(bess_k_max * 0.9, soc_bess_k + (150 * kesto_min / 60)) if bess_k_max > 0 else 0
-        
-        log.append({
-            'Aika': row['Lähtö_dt'], 'SoC': (soc_kwh / akkukoko) * 100, 
-            'BESS_H_SoC': (soc_bess_h / bess_h_max * 100) if bess_h_max > 0 else 0,
-            'BESS_K_SoC': (soc_bess_k / bess_k_max * 100) if bess_k_max > 0 else 0
-        })
-        
-        # 2. Lataus rannassa
-        if idx < len(df) - 1:
-            seisonta = (df.iloc[idx+1]['Lähtö_dt'] - row['Saapuminen_dt']).seconds / 60
-            nykyinen_sijainti = "Korppoo" if "Houtskari" in str(row['Lähtöpaikka']) else "Houtskari"
-            aktiivinen_teho = teho_h if nykyinen_sijainti == "Houtskari" else teho_k
-            
-            if seisonta >= LATAUS_MIN_MINS and aktiivinen_teho > 0:
-                vapaa_tila = (akkukoko * (s_max_limit / 100)) - soc_kwh
-                lataus = min(vapaa_tila, (aktiivinen_teho * (seisonta / 60)) * hyotysuhde)
-                
-                # Kulutetaan BESS-akkua
-                if nykyinen_sijainti == "Houtskari" and bess_h_max > 0:
-                    soc_bess_h -= min(lataus, max(0, soc_bess_h - (bess_h_max * 0.1)))
-                elif nykyinen_sijainti == "Korppoo" and bess_k_max > 0:
-                    soc_bess_k -= min(lataus, max(0, soc_bess_k - (bess_k_max * 0.1)))
-                
-                soc_kwh += lataus
-                tot_ladattu += lataus
-        
-        log.append({
-            'Aika': row['Saapuminen_dt'], 'SoC': (soc_kwh / akkukoko) * 100,
-            'BESS_H_SoC': (soc_bess_h / bess_h_max * 100) if bess_h_max > 0 else 0,
-            'BESS_K_SoC': (soc_bess_k / bess_k_max * 100) if bess_k_max > 0 else 0
-        })
-
-    return pd.DataFrame(log), pd.DataFrame(bess_log), tot_ladattu, tot_purettu
-
-# Suoritus
-latausteho_h = u_teho_houtskari if u_infra_malli in ["Molemmat päät", "Vain Houtskari"] else 0
-latausteho_k = u_teho_korppoo if u_infra_malli in ["Molemmat päät", "Vain Korppoo"] else 0
-
-# Kutsutaan funktiota niin että paluuarvot (4 kpl) täsmäävät
-df_sim, df_bess, tot_ladattu, tot_purettu = aja_simulaatio(
-    u_akkukoko, latausteho_h, latausteho_k, u_infra_malli, u_hyotysuhde, u_soc_max
-)
-
-# --- Määritellään muuttujat optimointia ja talouslaskentaa varten ---
-bess_kpl = 2 if u_infra_malli == "Molemmat päät" else 1
-kok_bess_kwh = v_data["bess_kwh"] * bess_kpl
-markkinatuotto_v = (v_data['taajuustulo'] + v_data['spot_saasto'] - v_data['aggregointi_kulu']) * bess_kpl
-
-def laske_lcc_yksinkertainen(test_akku, ladattu_vrk, investointi_pohja):
-    # Lasketaan investointi (CAPEX)
-    inv = (test_akku * u_capex_kwh) + investointi_pohja
-    # Vuotuiset operatiiviset kulut (Sähkö + huolto - tuotot)
-    vuosikulu = (ladattu_vrk * (st.session_state.s_hinta + s_siirto) * 365) + \
-                (kok_bess_kwh * BESS_HUOLTO_OPEX) - markkinatuotto_v
-    # 10 vuoden elinkaarikustannus nykyarvolla (diskontattuna)
-    lcc = inv + sum([vuosikulu / (1 + d_korko)**i for i in range(1, 11)])
-    return lcc
-
-st.sidebar.markdown("---")
-if st.sidebar.button("ETSI KAIKKI OPTIMIVAIHTOEHDOT"):
-    with st.spinner('Analysoidaan kaikkia rantavaihtoehtoja ja akkukokoja...'):
-        kaikki_skenaariot = []
-        
-        # Haetaan diesel-vertailukohta Excel-datasta (v_data)
-        d_hinta = v_data.get('Polttoaineen hinta', 1.3)
-        d_kulutus_vrk = v_data.get('Polttoaineen kulutus', 1500)
-        diesel_vuosikulu = d_kulutus_vrk * d_hinta * 365 + v_data.get('Huoltokulut', 50000)
-
-        # Testataan eri kemiat (NMC ja LFP)
-        kemiat = [("NMC", 300), ("LFP", 200)] 
-
-        for v_nimi, v_tiedot in rantavaihtoehdot.items():
-            test_teho = v_tiedot["max_p"]
-            test_bess_kpl = 2 if u_infra_malli == "Molemmat päät" else 1
-            test_bess_kwh = v_tiedot["bess_kwh"] * test_bess_kpl
-            
-            # Markkinatulot (varmistetaan oletusarvot .get-metodilla)
-            test_markkinatulo = (v_tiedot.get('taajuustulo', 0) + 
-                                 v_tiedot.get('spot_saasto', 0) - 
-                                 v_tiedot.get('aggregointi_kulu', 0)) * test_bess_kpl
-            
-            for k_nimi, k_capex in kemiat:
-                for test_koko in range(1000, 4201, 200): 
-                    # Simulaatio (HUOM: lisätty sääkerroin 1.2 turvamarginaaliksi)
-                    d_sim, d_bess, t_ladattu, t_purettu = aja_simulaatio(
-                        test_koko, test_teho, test_teho, u_infra_malli, u_hyotysuhde, u_soc_max
-                    )
-                    
-                    alin_soc = d_sim['SoC'].min()
-                    
-                    # Tarkistetaan elinikä (sykli-ikä vaihtelee kemian mukaan)
-                    c_life = 3000 if k_nimi == "NMC" else 6000
-                    m_vrk = t_purettu / test_koko
-                    e_v, _, _, _ = laske_akun_degradaatio(
-                    d_sim,
-                    t_purettu,
-                    test_koko,
-                    c_life,
-                    u_cal_loss,
-                    temp_kerroin
-)
-                    
-                    # Hyväksyntäehdot: 8v kesto JA SoC pysyy turvallisena
-                    if e_v >= 8.0 and alin_soc >= u_soc_min:
-                        # CAPEX laskenta
-                        inv_pohja = (test_bess_kwh * b_capex_per_kwh) + (c_varsi_base if u_varsi_paalla else 0) + (c_liittyma_base * test_bess_kpl)
-                        test_inv = (test_koko * k_capex) + inv_pohja
-                        
-                        # OPEX laskenta (Sähkö + BESS huolto - Markkinatuotto)
-                        test_vuosikulu_sahko = (t_ladattu * (st.session_state.get('s_hinta', 0.1) + s_siirto) * 365)
-                        test_opex = test_vuosikulu_sahko + (test_bess_kwh * BESS_HUOLTO_OPEX) - test_markkinatulo
-                        
-                        # Säästöt vs Diesel
-                        vuotuinen_saasto = diesel_vuosikulu - test_opex
-                        tm_aika = test_inv / vuotuinen_saasto if vuotuinen_saasto > 0 else 99
-                        
-                        # 10v LCC
-                        test_lcc = test_inv + sum([test_opex / (1 + d_korko)**i for i in range(1, 11)])
-                        
-                        kaikki_skenaariot.append({
-                            'V-Nimi': v_nimi, 'koko': test_koko, 'kemia': k_nimi,
-                            'teho': test_teho, 'elinika': e_v, 'lcc': test_lcc,
-                            'alin_soc': round(alin_soc, 1), 'inv': test_inv,
-                            'takaisinmaksu': tm_aika, 'saasto': vuotuinen_saasto
-                        })
-
-        if kaikki_skenaariot:
-            df_results = pd.DataFrame(kaikki_skenaariot).sort_values("lcc")
-            # Tallennetaan paras session stateen
-            st.session_state.optimi = kaikki_skenaariot[0] # Halvin LCC
-            st.sidebar.success(f"Optimi löydetty: {df_results.iloc[0]['koko']} kWh ({df_results.iloc[0]['kemia']})")
-            
-            # Näytetään tulostaulukko pääruudulla
-            st.write("### Optimointitulokset (Top 5)")
-            st.table(df_results[['V-Nimi', 'koko', 'kemia', 'takaisinmaksu', 'lcc', 'alin_soc']].head(5))
-        else:
-            st.sidebar.error("Ei löytynyt ehtoja täyttävää ratkaisua.")
-
-if "optimi" in st.session_state:
-    opt = st.session_state.optimi
-
-    u_akkukoko = opt["koko"]
-
-    st.info(
-        f"⚡ OPTIMOITU: {opt['v']} / {opt['koko']} kWh / {opt['kemia']} "
-        f"(LCC: {opt['lcc']:,.0f} €, elinikä {opt['elinika']:.1f} vuotta)"
-    )
-    # Huom: Jotta loppukoodi käyttää oikeita ranta-arvoja, päivitetään v_data
-    v_data = dict(rantavaihtoehdot[o['V-Nimi']])
-    latausteho_h = o['teho']
-    latausteho_k = o['teho']
-    df_sim = o['df']
-    df_bess = o['df_b']
-    tot_purettu = o['purettu']
-    tot_ladattu = o['ladattu']
-    
-    st.info(f"**LÖYDETTY OPTIMI:** Halvin ratkaisu on **{o['V-Nimi']}** ja **{u_akkukoko} kWh** akku. "
-            f"Tällä yhdistelmällä elinikä on **{o['elinika']:.1f} vuotta** ja 10v elinkaarikustannus on pienin.")
 # --- 5. ANALYYSI JA GRAAFIT ---
 st.title(f"Analyysi: {valittu_lautta}")
 
