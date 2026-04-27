@@ -18,6 +18,23 @@ rantavaihtoehdot = {
 
 # --- 1. APUFUNKTIOT ---
 
+def ensure_simulation():
+    if "df_sim" not in st.session_state:
+
+        df_sim, df_bess, tot_ladattu, tot_purettu = aja_simulaatio(
+            u_akkukoko,
+            u_teho_houtskari if u_infra_malli != "2. Pää" else 0,
+            u_teho_korppoo if u_infra_malli != "1. Pää" else 0,
+            u_infra_malli,
+            u_hyotysuhde,
+            u_soc_max
+        )
+
+        st.session_state.df_sim = df_sim
+        st.session_state.tot_ladattu = tot_ladattu
+        st.session_state.tot_purettu = tot_purettu
+        st.session_state.df_bess = df_bess
+
 def hae_sahkon_hinta():
     try:
         url = "https://api.porssisahko.net/v1/latest-prices.json"
@@ -217,19 +234,12 @@ if st.sidebar.button("Päivitä pörssisähkö"):
 
 # --- 5. ANALYYSI JA GRAAFIT ---
 # --- VARMISTETAAN SIMULAATION OLEMASSAOLO ---
-if "df_sim" not in st.session_state:
-    df_sim, df_bess, tot_ladattu, tot_purettu = aja_simulaatio(
-        u_akkukoko,
-        u_teho_houtskari if u_infra_malli != "2. Pää" else 0,
-        u_teho_korppoo if u_infra_malli != "1. Pää" else 0,
-        u_infra_malli,
-        u_hyotysuhde,
-        u_soc_max
-    )
+        
+ensure_simulation()
 
-    st.session_state.df_sim = df_sim
-    st.session_state.tot_ladattu = tot_ladattu
-    st.session_state.tot_purettu = tot_purettu
+df_sim = st.session_state.df_sim
+tot_ladattu = st.session_state.tot_ladattu
+tot_purettu = st.session_state.tot_purettu
 
 st.title(f"Analyysi: {valittu_lautta}")
 
