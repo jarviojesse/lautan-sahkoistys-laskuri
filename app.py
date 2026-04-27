@@ -17,7 +17,8 @@ rantavaihtoehdot = {
 
 # --- 1. APUFUNKTIOT ---
 
-def optimoi_jarjestelma(rantavaihtoehdot, aja_simulaatio, laske_akun_degradaatio):
+def optimoi_jarjestelma(rantavaihtoehdot, aja_simulaatio, laske_akun_degradaatio,
+                        infra_malli, hyotysuhde, soc_max, soc_min, capex_kwh, siirto, korko):
     kaikki_skenaariot = []
 
     kemiat = [("NMC", 300), ("LFP", 200)]
@@ -48,7 +49,7 @@ def optimoi_jarjestelma(rantavaihtoehdot, aja_simulaatio, laske_akun_degradaatio
                     test_koko,
                     c_life,
                     u_cal_loss,
-                    temp_kerroin
+                    u_lampotila
                 )
 
                 if e_v < 8.0 or alin_soc < u_soc_min:
@@ -279,10 +280,17 @@ st.sidebar.markdown("---")
 if st.sidebar.button("⚙️ Optimoi järjestelmä"):
     with st.spinner("Optimoidaan järjestelmää... tämä voi kestää hetken"):
         optimi, df_all = optimoi_jarjestelma(
-        rantavaihtoehdot,
-        aja_simulaatio,
-        laske_akun_degradaatio
-)
+            rantavaihtoehdot,
+            aja_simulaatio,
+            laske_akun_degradaatio,
+            u_infra_malli,
+            u_hyotysuhde,
+            u_soc_max,
+            u_soc_min,
+            u_capex_kwh,
+            s_siirto,
+            d_korko
+        )
 
         if optimi:
             st.session_state.optimi = optimi
